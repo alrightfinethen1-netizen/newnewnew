@@ -4,7 +4,11 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.drawable.AdaptiveIconDrawable;
+import android.os.Build;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
@@ -41,6 +45,10 @@ public class MainActivity extends Activity {
             {"Kodi", "Your media library", "#17B2E7", "org.xbmc.kodi"},
             {"SmartTube", "Videos without ads", "#FF3B30", "org.smarttube.stable", "com.teamsmart.videomanager.tv", "com.liskovsoft.smarttubetv.beta"},
     };
+
+    private static final int GLASS = 0x33FFFFFF;
+    private static final int GLASS_FOCUS = 0x59FFFFFF;
+    private static final int GLASS_EDGE = 0x33FFFFFF;
 
     private LinearLayout row;
     private TextView title, subtitle;
@@ -212,43 +220,24 @@ public class MainActivity extends Activity {
         final int accent = Color.parseColor(accentHex);
 
         FrameLayout tile = new FrameLayout(this);
-        tile.setBackground(tileBg(0xFF1C1C22, 0, 0));
+        tile.setBackground(tileBg(GLASS, GLASS_EDGE, 2));
         tile.setClipToOutline(true);
         tile.setElevation(px(8));
         tile.setFocusable(true);
         tile.setClickable(true);
 
         ImageView art = new ImageView(this);
-        boolean full = false;
-        try {
-            Drawable custom = loadAsset("tiles/" + pkg + ".png");
-            if (custom != null) {
-                art.setImageDrawable(custom);
-                full = true;
-            } else {
-                Drawable banner = pm.getApplicationBanner(pkg);
-                if (banner != null) {
-                    art.setImageDrawable(banner);
-                    full = true;
-                } else {
-                    ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
-                    art.setImageDrawable(ai.loadIcon(pm));
-                }
-            }
-        } catch (Exception ignored) { }
-        art.setScaleType(full ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
-        if (!full) {
-            int p = th / 5;
-            art.setPadding(p, p, p, p);
-            tile.setBackground(tileBg(0xFF24242C, 0, 0));
+        Drawable custom = loadAsset("tiles/" + pkg + ".png");
+        if (custom != null) {
+            art.setImageDrawable(custom);          // your own PNG is shown as-is
+        } else {
+            Bitmap white = whiteGlyph(pm, pkg);
+            if (white != null) art.setImageBitmap(white);
         }
+        art.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        int pad = th * 22 / 100;
+        art.setPadding(pad, pad, pad, pad);
         tile.addView(art, new FrameLayout.LayoutParams(-1, -1));
-
-        // subtle top sheen for a glassy feel
-        View sheen = new View(this);
-        sheen.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x26FFFFFF, 0x00FFFFFF}));
-        tile.addView(sheen, new FrameLayout.LayoutParams(-1, th / 2));
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(tw, th);
         lp.setMargins(gap / 2, 0, gap / 2, 0);
@@ -258,13 +247,87 @@ public class MainActivity extends Activity {
         tile.setOnFocusChangeListener((v, focused) -> {
             v.animate().scaleX(focused ? 1.12f : 1f).scaleY(focused ? 1.12f : 1f).setDuration(180).start();
             v.setElevation(px(focused ? 28 : 8));
-            v.setBackground(tileBg(0xFF1C1C22, focused ? 0xFFFFFFFF : 0, focused ? Math.max(3, px(4)) : 0));
+            v.setBackground(tileBg(focused ? GLASS_FOCUS : GLASS, focused ? 0xFFFFFFFF : GLASS_EDGE, focused ? Math.max(3, px(4)) : 2));
             if (focused) {
                 title.setText(label);
                 subtitle.setText(tagline);
             }
         });
         return tile;
+    }
+
+    /** Turns the app's own installed icon into a white glyph on transparent. */
+    private Bitmap whiteGlyph(PackageManager pm, String pkg) {
+        try {
+            Drawable d = pm.getApplicationIcon(pkg);
+            boolean adaptive = false;
+            if (Build.VERSION.SDK_INT >= 26 && d instanceof AdaptiveIconDrawable) {
+                Drawable fg = ((AdaptiveIconDrawable) d).getForeground();
+                if (fg != null) { d = fg; adaptive = true; }
+            }
+            int n = 432;
+            Bitmap src = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(src);
+            d.setBounds(0, 0, n, n);
+            d.draw(c);
+            return whiten(src, adaptive);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Bitmap whiten(Bitmap src, boolean forceAlpha) {
+        int w = src.getWidth(), h = src.getHeight();
+        int[] p = new int[w * h];
+        src.getPixels(p, 0, w, 0, 0, w, h);
+
+        int opaque = 0;
+        int[] cnt = new int[4096];
+        long[] sr = new long[4096], sg = new long[4096], sb = new long[4096];
+        for (int c : p) {
+            if ((c >>> 24) < 250) continue;
+            opaque++;
+            int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+            int k = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+            cnt[k]++; sr[k] += r; sg[k] += g; sb[k] += b;
+        }
+        // Solid-background icon (opaque, mostly one colour)? Knock the background out.
+        boolean knock = !forceAlpha && opaque > p.length * 0.6;
+        int bgR = 0, bgG = 0, bgB = 0;
+        if (knock) {
+            int best = 0;
+            for (int k = 1; k < 4096; k++) if (cnt[k] > cnt[best]) best = k;
+            bgR = (int) (sr[best] / cnt[best]);
+            bgG = (int) (sg[best] / cnt[best]);
+            bgB = (int) (sb[best] / cnt[best]);
+        }
+
+        int[] out = new int[p.length];
+        int minX = w, minY = h, maxX = -1, maxY = -1;
+        for (int i = 0; i < p.length; i++) {
+            int c = p[i];
+            int a = c >>> 24;
+            int alpha = a;
+            if (knock) {
+                int dr = Math.abs(((c >> 16) & 255) - bgR);
+                int dg = Math.abs(((c >> 8) & 255) - bgG);
+                int db = Math.abs((c & 255) - bgB);
+                int dist = Math.max(dr, Math.max(dg, db));
+                int ramp = Math.max(0, Math.min(255, (dist - 28) * 255 / 72));
+                alpha = a * ramp / 255;
+            }
+            out[i] = (alpha << 24) | 0x00FFFFFF;
+            if (alpha > 40) {
+                int x = i % w, y = i / w;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+        Bitmap o = Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888);
+        if (maxX < 0) return o;
+        return Bitmap.createBitmap(o, minX, minY, maxX - minX + 1, maxY - minY + 1);
     }
 
     private GradientDrawable tileBg(int fill, int stroke, int strokeW) {
